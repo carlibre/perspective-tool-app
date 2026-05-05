@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Perspective Correction Tool v7 (Improved Mask)</title>
+<title>Perspective Correction Tool v7 (Improved)</title>
 
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
 
@@ -14,6 +14,7 @@ body {
   background:#0b1020;
   color:white;
 }
+
 .header {
   height:60px;
   display:flex;
@@ -22,22 +23,26 @@ body {
   padding:0 20px;
   background:#111827;
 }
+
 .workspace {
   position:relative;
   height:calc(100vh - 60px);
 }
+
 video, canvas {
   position:absolute;
   width:100%;
   height:100%;
   object-fit:cover;
 }
+
 .controls {
   position:absolute;
   bottom:20px;
   left:20px;
   z-index:10;
 }
+
 button {
   padding:12px;
   margin-right:10px;
@@ -113,7 +118,6 @@ function getPaperMask(){
 
   let mask = new Uint8Array(w*h);
 
-  // FIRST PASS (original brightness test)
   for(let y=0;y<h;y+=2){
     for(let x=0;x<w;x+=2){
       const i = (y*w+x)*4;
@@ -123,38 +127,18 @@ function getPaperMask(){
 
       const brightness = (r+g+b)/3;
 
-      if(
+      const isPaper =
         brightness > 175 &&
         Math.abs(r-g) < 20 &&
-        Math.abs(g-b) < 20
-      ){
+        Math.abs(g-b) < 20;
+
+      if(isPaper){
         mask[y*w+x] = 1;
       }
     }
   }
 
-  // SECOND PASS (remove isolated noise)
-  let clean = new Uint8Array(w*h);
-
-  for(let y=2;y<h-2;y+=2){
-    for(let x=2;x<w-2;x+=2){
-
-      let count = 0;
-
-      for(let yy=-2; yy<=2; yy+=2){
-        for(let xx=-2; xx<=2; xx+=2){
-          if(mask[(y+yy)*w + (x+xx)]) count++;
-        }
-      }
-
-      // keep only dense regions (paper)
-      if(count >= 6){
-        clean[y*w+x] = 1;
-      }
-    }
-  }
-
-  return clean;
+  return mask;
 }
 
 /* ========================= EDGE DETECTION ========================= */
@@ -182,11 +166,12 @@ function detectEdges(){
         -d[i-w*4] + d[i+w*4]
         -2*d[i-4] + 2*d[i+4];
 
-      const mag = Math.sqrt(gx*gx+gy*gy);
+      const mag = Math.sqrt(gx*gx + gy*gy);
 
-      if(mag > 150){ // 🔥 slightly stricter
+      if(mag > 150){
         edges.push({
-          x,y,
+          x,
+          y,
           angle:Math.atan2(gy,gx),
           mag
         });
@@ -198,40 +183,40 @@ function detectEdges(){
   edges = edges.slice(0,1800);
 }
 
-/* ========================= CLUSTER LINES ========================= */
+/* ========================= CLUSTER LINES (UPDATED) ========================= */
 function clusterLines(){
   clusters = [];
 
   edges.forEach(p=>{
-    let found=false;
+    let found = false;
 
     for(let c of clusters){
       const base = c.points[0];
 
       if(
-        Math.abs(c.angle - p.angle) < 0.08 &&
-        Math.hypot(base.x-p.x, base.y-p.y) < 100
+        Math.abs(c.angle - p.angle) < 0.12 &&   // 🔥 relaxed
+        Math.hypot(base.x - p.x, base.y - p.y) < 140 // 🔥 relaxed
       ){
         c.points.push(p);
-        found=true;
+        found = true;
         break;
       }
     }
 
     if(!found){
       clusters.push({
-        angle:p.angle,
-        points:[p]
+        angle: p.angle,
+        points: [p]
       });
     }
   });
 
-  clusters = clusters.filter(c=>c.points.length > 18);
+  clusters = clusters.filter(c => c.points.length > 18);
 }
 
 /* ========================= VANISHING POINT ========================= */
 function estimateVP(){
-  let sx=0, sy=0, count=0;
+  let sx = 0, sy = 0, count = 0;
 
   clusters.forEach(c=>{
     const p = c.points[Math.floor(c.points.length/2)];
@@ -239,14 +224,14 @@ function estimateVP(){
     const dx = Math.cos(c.angle);
     const dy = Math.sin(c.angle);
 
-    sx += p.x + dx*600;
-    sy += p.y + dy*600;
+    sx += p.x + dx * 600;
+    sy += p.y + dy * 600;
     count++;
   });
 
   vanishingPoint = {
-    x:sx/count,
-    y:sy/count
+    x: sx / count,
+    y: sy / count
   };
 }
 
@@ -255,35 +240,35 @@ function draw(){
   ctx.putImageData(imageData,0,0);
 
   clusters.forEach(c=>{
-    c.points.slice(0,6).forEach(p=>{
+    c.points.slice(0,20).forEach(p=>{ // 🔥 more lines drawn
 
       const dx = vanishingPoint.x - p.x;
       const dy = vanishingPoint.y - p.y;
 
       const target = Math.atan2(dy,dx);
 
-      let diff = Math.abs(target-c.angle);
-      diff = Math.min(diff, Math.PI-diff);
+      let diff = Math.abs(target - c.angle);
+      diff = Math.min(diff, Math.PI - diff);
 
       let color = "red";
       if(diff < 0.12) color = "lime";
       else if(diff < 0.25) color = "yellow";
 
-      ctx.strokeStyle=color;
-      ctx.globalAlpha=0.65;
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.65;
 
       ctx.beginPath();
-      ctx.moveTo(p.x - dx*6, p.y - dy*6);
+      ctx.moveTo(p.x - dx * 6, p.y - dy * 6);
       ctx.lineTo(vanishingPoint.x, vanishingPoint.y);
       ctx.stroke();
     });
   });
 
-  ctx.globalAlpha=1;
+  ctx.globalAlpha = 1;
 
-  ctx.fillStyle="cyan";
+  ctx.fillStyle = "cyan";
   ctx.beginPath();
-  ctx.arc(vanishingPoint.x, vanishingPoint.y, 4, 0, Math.PI*2);
+  ctx.arc(vanishingPoint.x, vanishingPoint.y, 4, 0, Math.PI * 2);
   ctx.fill();
 }
 
@@ -293,15 +278,15 @@ function getPos(e){
   const t = e.touches ? e.touches[0] : e;
 
   return {
-    x:(t.clientX-rect.left)*(canvas.width/rect.width),
-    y:(t.clientY-rect.top)*(canvas.height/rect.height)
+    x:(t.clientX - rect.left) * (canvas.width / rect.width),
+    y:(t.clientY - rect.top) * (canvas.height / rect.height)
   };
 }
 
 function hitVP(p){
   return Math.hypot(
-    p.x-vanishingPoint.x,
-    p.y-vanishingPoint.y
+    p.x - vanishingPoint.x,
+    p.y - vanishingPoint.y
   ) < 70;
 }
 
@@ -339,8 +324,8 @@ canvas.addEventListener("touchend",stopDrag);
 /* ========================= RECENTER ========================= */
 function recenterVP(){
   vanishingPoint = {
-    x:canvas.width/2,
-    y:canvas.height/2
+    x: canvas.width / 2,
+    y: canvas.height / 2
   };
 
   frozen = true;
