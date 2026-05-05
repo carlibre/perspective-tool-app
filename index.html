@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Perspective Correction Tool v8 (Accurate)</title>
+<title>Perspective Tool v9 (Smart Page Detection)</title>
 
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
 
@@ -18,7 +18,6 @@ body{
   height:60px;
   display:flex;
   align-items:center;
-  justify-content:space-between;
   padding:0 20px;
   background:#111827;
 }
@@ -53,7 +52,7 @@ button{
 <body>
 
 <div class="header">
-  <h3>Perspective Correction Tool v8</h3>
+  <h3>Perspective Tool v9</h3>
 </div>
 
 <div class="workspace">
@@ -75,10 +74,11 @@ const ctx = canvas.getContext("2d");
 let imageData;
 let edges = [];
 let vanishingPoint = {x:0,y:0};
+let pagePolygon = [];
 let frozen = false;
 let dragging = false;
 
-/* ========================= CAMERA ========================= */
+/* ================= CAMERA ================= */
 async function startCamera(){
   const stream = await navigator.mediaDevices.getUserMedia({
     video:{facingMode:"environment"}
@@ -90,62 +90,89 @@ async function startCamera(){
   canvas.height = video.videoHeight;
 }
 
-/* ========================= CAPTURE ========================= */
+/* ================= CAPTURE ================= */
 function capture(){
   frozen = true;
 
   ctx.drawImage(video,0,0,canvas.width,canvas.height);
   imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
 
+  detectPage();   // 🔥 NEW
   detectEdges();
   estimateVP();
   draw();
 }
 
-/* ========================= PAPER MASK ========================= */
-function getPaperMask(){
+/* ================= PAGE DETECTION ================= */
+function detectPage(){
   const d = imageData.data;
   const w = canvas.width;
   const h = canvas.height;
 
-  let mask = new Uint8Array(w*h);
+  let points = [];
 
-  for(let y=0;y<h;y+=2){
-    for(let x=0;x<w;x+=2){
+  // find strong contrast edges (likely page border)
+  for(let y=2;y<h-2;y+=4){
+    for(let x=2;x<w-2;x+=4){
       const i = (y*w+x)*4;
-      const r = d[i];
-      const g = d[i+1];
-      const b = d[i+2];
 
-      const brightness = (r+g+b)/3;
+      const gx = d[i+4] - d[i-4];
+      const gy = d[i+w*4] - d[i-w*4];
 
-      if(
-        brightness > 180 &&
-        Math.abs(r-g) < 18 &&
-        Math.abs(g-b) < 18
-      ){
-        mask[y*w+x] = 1;
+      const mag = Math.sqrt(gx*gx+gy*gy);
+
+      if(mag > 200){
+        points.push({x,y});
       }
     }
   }
 
-  return mask;
+  // find extreme corners (simple but effective)
+  let tl = {x:99999,y:99999};
+  let tr = {x:0,y:99999};
+  let bl = {x:99999,y:0};
+  let br = {x:0,y:0};
+
+  points.forEach(p=>{
+    if(p.x+p.y < tl.x+tl.y) tl = p;
+    if((w-p.x)+p.y < (w-tr.x)+tr.y) tr = p;
+    if(p.x+(h-p.y) < bl.x+(h-bl.y)) bl = p;
+    if((w-p.x)+(h-p.y) < (w-br.x)+(h-br.y)) br = p;
+  });
+
+  pagePolygon = [tl,tr,br,bl];
 }
 
-/* ========================= EDGE DETECTION ========================= */
+/* ================= POINT IN POLYGON ================= */
+function insidePage(x,y){
+  let inside = false;
+
+  for(let i=0,j=pagePolygon.length-1;i<pagePolygon.length;j=i++){
+    const xi = pagePolygon[i].x, yi = pagePolygon[i].y;
+    const xj = pagePolygon[j].x, yj = pagePolygon[j].y;
+
+    const intersect =
+      ((yi>y)!=(yj>y)) &&
+      (x < (xj-xi)*(y-yi)/(yj-yi)+xi);
+
+    if(intersect) inside = !inside;
+  }
+
+  return inside;
+}
+
+/* ================= EDGE DETECTION ================= */
 function detectEdges(){
   edges = [];
 
   const d = imageData.data;
   const w = canvas.width;
   const h = canvas.height;
-  const mask = getPaperMask();
 
   for(let y=2;y<h-2;y+=2){
     for(let x=2;x<w-2;x+=2){
 
-      const idx = y*w+x;
-      if(!mask[idx]) continue;
+      if(!insidePage(x,y)) continue; // 🔥 key filter
 
       const i = (y*w+x)*4;
 
@@ -157,12 +184,12 @@ function detectEdges(){
         -d[i-w*4] + d[i+w*4]
         -2*d[i-4] + 2*d[i+4];
 
-      const mag = Math.sqrt(gx*gx + gy*gy);
+      const mag = Math.sqrt(gx*gx+gy*gy);
 
       if(mag > 120){
         edges.push({
-          x, y,
-          angle: Math.atan2(gy,gx),
+          x,y,
+          angle:Math.atan2(gy,gx),
           mag
         });
       }
@@ -170,69 +197,74 @@ function detectEdges(){
   }
 
   edges.sort((a,b)=>b.mag-a.mag);
-  edges = edges.slice(0,2500);
+  edges = edges.slice(0,1500); // 🔥 fewer, cleaner
 }
 
-/* ========================= VANISHING POINT ========================= */
+/* ================= VANISHING POINT ================= */
 function estimateVP(){
-  let sx=0, sy=0, count=0;
+  let sx=0, sy=0;
 
   edges.forEach(p=>{
-    const dx = Math.cos(p.angle);
-    const dy = Math.sin(p.angle);
-
-    sx += p.x + dx*500;
-    sy += p.y + dy*500;
-    count++;
+    sx += p.x + Math.cos(p.angle)*400;
+    sy += p.y + Math.sin(p.angle)*400;
   });
 
   vanishingPoint = {
-    x:sx/count,
-    y:sy/count
+    x:sx/edges.length,
+    y:sy/edges.length
   };
 }
 
-/* ========================= DRAW ========================= */
+/* ================= DRAW ================= */
 function draw(){
   ctx.putImageData(imageData,0,0);
+
+  // draw page boundary
+  ctx.strokeStyle="cyan";
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  pagePolygon.forEach((p,i)=>{
+    if(i===0) ctx.moveTo(p.x,p.y);
+    else ctx.lineTo(p.x,p.y);
+  });
+  ctx.closePath();
+  ctx.stroke();
 
   edges.forEach(p=>{
     const dx = vanishingPoint.x - p.x;
     const dy = vanishingPoint.y - p.y;
 
-    const targetAngle = Math.atan2(dy,dx);
+    const target = Math.atan2(dy,dx);
 
-    let diff = Math.abs(targetAngle - p.angle);
-    diff = Math.min(diff, Math.PI - diff);
+    let diff = Math.abs(target - p.angle);
+    diff = Math.min(diff, Math.PI-diff);
 
-    let color = "red";
-    if(diff < 0.1) color = "lime";
-    else if(diff < 0.2) color = "yellow";
+    let color="red";
+    if(diff<0.1) color="lime";
+    else if(diff<0.2) color="yellow";
 
-    // FULL EXTENDED LINE
-    const length = 2000;
-    const dirX = Math.cos(targetAngle);
-    const dirY = Math.sin(targetAngle);
+    const len = 2000;
+    const dirX = Math.cos(target);
+    const dirY = Math.sin(target);
 
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.6;
+    ctx.strokeStyle=color;
+    ctx.globalAlpha=0.6;
 
     ctx.beginPath();
-    ctx.moveTo(p.x - dirX*length, p.y - dirY*length);
-    ctx.lineTo(p.x + dirX*length, p.y + dirY*length);
+    ctx.moveTo(p.x - dirX*len, p.y - dirY*len);
+    ctx.lineTo(p.x + dirX*len, p.y + dirY*len);
     ctx.stroke();
   });
 
-  ctx.globalAlpha = 1;
+  ctx.globalAlpha=1;
 
-  // VANISHING POINT
   ctx.fillStyle="cyan";
   ctx.beginPath();
-  ctx.arc(vanishingPoint.x, vanishingPoint.y, 5, 0, Math.PI*2);
+  ctx.arc(vanishingPoint.x,vanishingPoint.y,5,0,Math.PI*2);
   ctx.fill();
 }
 
-/* ========================= DRAGGING ========================= */
+/* ================= DRAG ================= */
 function getPos(e){
   const rect = canvas.getBoundingClientRect();
   const t = e.touches ? e.touches[0] : e;
@@ -243,20 +275,13 @@ function getPos(e){
   };
 }
 
-function hitVP(p){
-  return Math.hypot(
-    p.x-vanishingPoint.x,
-    p.y-vanishingPoint.y
-  ) < 80;
-}
-
 function startDrag(e){
   if(!frozen) return;
 
   const p = getPos(e);
-  if(hitVP(p)){
-    dragging = true;
-    e.preventDefault();
+
+  if(Math.hypot(p.x-vanishingPoint.x,p.y-vanishingPoint.y)<80){
+    dragging=true;
   }
 }
 
@@ -265,29 +290,22 @@ function drag(e){
 
   vanishingPoint = getPos(e);
   draw();
-
-  e.preventDefault();
 }
 
 function stopDrag(){
-  dragging = false;
+  dragging=false;
 }
 
 canvas.addEventListener("mousedown",startDrag);
 canvas.addEventListener("mousemove",drag);
 canvas.addEventListener("mouseup",stopDrag);
 
-canvas.addEventListener("touchstart",startDrag,{passive:false});
-canvas.addEventListener("touchmove",drag,{passive:false});
-canvas.addEventListener("touchend",stopDrag);
-
-/* ========================= RECENTER ========================= */
+/* ================= RECENTER ================= */
 function recenterVP(){
   vanishingPoint = {
     x:canvas.width/2,
     y:canvas.height/2
   };
-  frozen = true;
   draw();
 }
 </script>
