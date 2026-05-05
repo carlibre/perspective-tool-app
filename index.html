@@ -3,19 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Perspective Correction Tool v7 (Improved)</title>
+<title>Perspective Correction Tool v8 (Accurate)</title>
 
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
 
 <style>
-body {
+body{
   margin:0;
   font-family:Inter;
   background:#0b1020;
   color:white;
 }
-
-.header {
+.header{
   height:60px;
   display:flex;
   align-items:center;
@@ -23,27 +22,23 @@ body {
   padding:0 20px;
   background:#111827;
 }
-
-.workspace {
+.workspace{
   position:relative;
   height:calc(100vh - 60px);
 }
-
-video, canvas {
+video, canvas{
   position:absolute;
   width:100%;
   height:100%;
   object-fit:cover;
 }
-
-.controls {
+.controls{
   position:absolute;
   bottom:20px;
   left:20px;
   z-index:10;
 }
-
-button {
+button{
   padding:12px;
   margin-right:10px;
   border:none;
@@ -58,7 +53,7 @@ button {
 <body>
 
 <div class="header">
-  <h3>Perspective Correction Tool v7</h3>
+  <h3>Perspective Correction Tool v8</h3>
 </div>
 
 <div class="workspace">
@@ -78,22 +73,16 @@ const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 
 let imageData;
-let vanishingPoint = {x:0,y:0};
-
 let edges = [];
-let clusters = [];
-
+let vanishingPoint = {x:0,y:0};
 let frozen = false;
 let dragging = false;
 
-/* =========================
-   CAMERA
-========================= */
+/* ========================= CAMERA ========================= */
 async function startCamera(){
   const stream = await navigator.mediaDevices.getUserMedia({
     video:{facingMode:"environment"}
   });
-
   video.srcObject = stream;
   await new Promise(r=>video.onloadedmetadata=r);
 
@@ -101,9 +90,7 @@ async function startCamera(){
   canvas.height = video.videoHeight;
 }
 
-/* =========================
-   CAPTURE
-========================= */
+/* ========================= CAPTURE ========================= */
 function capture(){
   frozen = true;
 
@@ -111,14 +98,11 @@ function capture(){
   imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
 
   detectEdges();
-  clusterLines();
   estimateVP();
   draw();
 }
 
-/* =========================
-   STRONGER PAPER MASK (FIXED)
-========================= */
+/* ========================= PAPER MASK ========================= */
 function getPaperMask(){
   const d = imageData.data;
   const w = canvas.width;
@@ -128,22 +112,18 @@ function getPaperMask(){
 
   for(let y=0;y<h;y+=2){
     for(let x=0;x<w;x+=2){
-
       const i = (y*w+x)*4;
-
       const r = d[i];
       const g = d[i+1];
       const b = d[i+2];
 
       const brightness = (r+g+b)/3;
 
-      // 🔥 stricter: removes shadows + desk color bleed
-      const isPaper =
-        brightness > 175 &&
-        Math.abs(r-g) < 20 &&
-        Math.abs(g-b) < 20;
-
-      if(isPaper){
+      if(
+        brightness > 180 &&
+        Math.abs(r-g) < 18 &&
+        Math.abs(g-b) < 18
+      ){
         mask[y*w+x] = 1;
       }
     }
@@ -152,9 +132,7 @@ function getPaperMask(){
   return mask;
 }
 
-/* =========================
-   EDGE DETECTION (PAPER ONLY)
-========================= */
+/* ========================= EDGE DETECTION ========================= */
 function detectEdges(){
   edges = [];
 
@@ -167,7 +145,6 @@ function detectEdges(){
     for(let x=2;x<w-2;x+=2){
 
       const idx = y*w+x;
-
       if(!mask[idx]) continue;
 
       const i = (y*w+x)*4;
@@ -180,70 +157,32 @@ function detectEdges(){
         -d[i-w*4] + d[i+w*4]
         -2*d[i-4] + 2*d[i+4];
 
-      const mag = Math.sqrt(gx*gx+gy*gy);
+      const mag = Math.sqrt(gx*gx + gy*gy);
 
-      if(mag > 130){
+      if(mag > 120){
         edges.push({
-          x,y,
-          angle:Math.atan2(gy,gx)
+          x, y,
+          angle: Math.atan2(gy,gx),
+          mag
         });
       }
     }
   }
 
   edges.sort((a,b)=>b.mag-a.mag);
-  edges = edges.slice(0,1800);
+  edges = edges.slice(0,2500);
 }
 
-/* =========================
-   CLUSTER LINES
-========================= */
-function clusterLines(){
-  clusters = [];
-
-  edges.forEach(p=>{
-    let found=false;
-
-    for(let c of clusters){
-      const base = c.points[0];
-
-      if(
-        Math.abs(c.angle - p.angle) < 0.08 &&
-        Math.hypot(base.x-p.x, base.y-p.y) < 100
-      ){
-        c.points.push(p);
-        found=true;
-        break;
-      }
-    }
-
-    if(!found){
-      clusters.push({
-        angle:p.angle,
-        points:[p]
-      });
-    }
-  });
-
-  clusters = clusters.filter(c=>c.points.length > 18);
-}
-
-/* =========================
-   STABLE VANISHING POINT (FIXED DRIFT)
-========================= */
+/* ========================= VANISHING POINT ========================= */
 function estimateVP(){
   let sx=0, sy=0, count=0;
 
-  clusters.forEach(c=>{
-    const p = c.points[Math.floor(c.points.length/2)];
+  edges.forEach(p=>{
+    const dx = Math.cos(p.angle);
+    const dy = Math.sin(p.angle);
 
-    const dx = Math.cos(c.angle);
-    const dy = Math.sin(c.angle);
-
-    // 🔥 reduced projection distance = less drift
-    sx += p.x + dx*600;
-    sy += p.y + dy*600;
-
+    sx += p.x + dx*500;
+    sy += p.y + dy*500;
     count++;
   });
 
@@ -253,49 +192,47 @@ function estimateVP(){
   };
 }
 
-/* =========================
-   DRAW CORRECTIONS ONLY
-========================= */
+/* ========================= DRAW ========================= */
 function draw(){
   ctx.putImageData(imageData,0,0);
 
-  clusters.forEach(c=>{
-    c.points.slice(0,6).forEach(p=>{
+  edges.forEach(p=>{
+    const dx = vanishingPoint.x - p.x;
+    const dy = vanishingPoint.y - p.y;
 
-      const dx = vanishingPoint.x - p.x;
-      const dy = vanishingPoint.y - p.y;
+    const targetAngle = Math.atan2(dy,dx);
 
-      const target = Math.atan2(dy,dx);
+    let diff = Math.abs(targetAngle - p.angle);
+    diff = Math.min(diff, Math.PI - diff);
 
-      let diff = Math.abs(target-c.angle);
-      diff = Math.min(diff, Math.PI-diff);
+    let color = "red";
+    if(diff < 0.1) color = "lime";
+    else if(diff < 0.2) color = "yellow";
 
-      let color = "red";
-      if(diff < 0.12) color = "lime";
-      else if(diff < 0.25) color = "yellow";
+    // FULL EXTENDED LINE
+    const length = 2000;
+    const dirX = Math.cos(targetAngle);
+    const dirY = Math.sin(targetAngle);
 
-      ctx.strokeStyle=color;
-      ctx.globalAlpha=0.65;
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.6;
 
-      ctx.beginPath();
-      ctx.moveTo(p.x - dx*6, p.y - dy*6);
-      ctx.lineTo(vanishingPoint.x, vanishingPoint.y);
-      ctx.stroke();
-    });
+    ctx.beginPath();
+    ctx.moveTo(p.x - dirX*length, p.y - dirY*length);
+    ctx.lineTo(p.x + dirX*length, p.y + dirY*length);
+    ctx.stroke();
   });
 
-  ctx.globalAlpha=1;
+  ctx.globalAlpha = 1;
 
-  // smaller + cleaner VP
+  // VANISHING POINT
   ctx.fillStyle="cyan";
   ctx.beginPath();
-  ctx.arc(vanishingPoint.x, vanishingPoint.y, 4, 0, Math.PI*2);
+  ctx.arc(vanishingPoint.x, vanishingPoint.y, 5, 0, Math.PI*2);
   ctx.fill();
 }
 
-/* =========================
-   DRAG VANISHING POINT
-========================= */
+/* ========================= DRAGGING ========================= */
 function getPos(e){
   const rect = canvas.getBoundingClientRect();
   const t = e.touches ? e.touches[0] : e;
@@ -310,7 +247,7 @@ function hitVP(p){
   return Math.hypot(
     p.x-vanishingPoint.x,
     p.y-vanishingPoint.y
-  ) < 70;
+  ) < 80;
 }
 
 function startDrag(e){
@@ -328,6 +265,7 @@ function drag(e){
 
   vanishingPoint = getPos(e);
   draw();
+
   e.preventDefault();
 }
 
@@ -343,15 +281,12 @@ canvas.addEventListener("touchstart",startDrag,{passive:false});
 canvas.addEventListener("touchmove",drag,{passive:false});
 canvas.addEventListener("touchend",stopDrag);
 
-/* =========================
-   RECENTER VP
-========================= */
+/* ========================= RECENTER ========================= */
 function recenterVP(){
   vanishingPoint = {
     x:canvas.width/2,
     y:canvas.height/2
   };
-
   frozen = true;
   draw();
 }
