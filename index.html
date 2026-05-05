@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Perspective Correction Tool v7 (Improved)</title>
+
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+
+<style>
+body {
+  margin:0;
+  font-family:Inter;
+  background:#0b1020;
+  color:white;
+}
+
+.header {
+  height:60px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:0 20px;
+  background:#111827;
+}
+
+.workspace {
+  position:relative;
+  height:calc(100vh - 60px);
+}
+
+video, canvas {
+  position:absolute;
+  width:100%;
+  height:100%;
+  object-fit:cover;
+}
+
+.controls {
+  position:absolute;
+  bottom:20px;
+  left:20px;
+  z-index:10;
+}
+
+button {
+  padding:12px;
+  margin-right:10px;
+  border:none;
+  border-radius:8px;
+  background:#3b82f6;
+  color:white;
+  cursor:pointer;
+}
+</style>
+</head>
+
+<body>
+
+<div class="header">
+  <h3>Perspective Correction Tool v7</h3>
+</div>
+
+<div class="workspace">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+
+  <div class="controls">
+    <button onclick="startCamera()">Start Camera</button>
+    <button onclick="capture()">Capture</button>
+    <button onclick="recenterVP()">Recenter VP</button>
+  </div>
+</div>
+
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+let imageData;
+let vanishingPoint = {x:0,y:0};
+
+let edges = [];
+let clusters = [];
+
+let frozen = false;
+let dragging = false;
+
+/* =========================
+   CAMERA
+========================= */
+async function startCamera(){
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:"environment"}
+  });
+
+  video.srcObject = stream;
+  await new Promise(r=>video.onloadedmetadata=r);
+
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+}
+
+/* =========================
+   CAPTURE
+========================= */
+function capture(){
+  frozen = true;
+
+  ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+
+  detectEdges();
+  clusterLines();
+  estimateVP();
+  draw();
+}
+
+/* =========================
+   STRONGER PAPER MASK (FIXED)
+========================= */
+function getPaperMask(){
+  const d = imageData.data;
+  const w = canvas.width;
+  const h = canvas.height;
+
+  let mask = new Uint8Array(w*h);
+
+  for(let y=0;y<h;y+=2){
+    for(let x=0;x<w;x+=2){
+
+      const i = (y*w+x)*4;
+
+      const r = d[i];
+      const g = d[i+1];
+      const b = d[i+2];
+
+      const brightness = (r+g+b)/3;
+
+      // 🔥 stricter: removes shadows + desk color bleed
+      const isPaper =
+        brightness > 175 &&
+        Math.abs(r-g) < 20 &&
+        Math.abs(g-b) < 20;
+
+      if(isPaper){
+        mask[y*w+x] = 1;
+      }
+    }
+  }
+
+  return mask;
+}
+
+/* =========================
+   EDGE DETECTION (PAPER ONLY)
+========================= */
+function detectEdges(){
+  edges = [];
+
+  const d = imageData.data;
+  const w = canvas.width;
+  const h = canvas.height;
+  const mask = getPaperMask();
+
+  for(let y=2;y<h-2;y+=2){
+    for(let x=2;x<w-2;x+=2){
+
+      const idx = y*w+x;
+
+      if(!mask[idx]) continue;
+
+      const i = (y*w+x)*4;
+
+      const gx =
+        -d[i-4] + d[i+4]
+        -2*d[i-w*4] + 2*d[i+w*4];
+
+      const gy =
+        -d[i-w*4] + d[i+w*4]
+        -2*d[i-4] + 2*d[i+4];
+
+      const mag = Math.sqrt(gx*gx+gy*gy);
+
+      if(mag > 130){
+        edges.push({
+          x,y,
+          angle:Math.atan2(gy,gx)
+        });
+      }
+    }
+  }
+
+  edges.sort((a,b)=>b.mag-a.mag);
+  edges = edges.slice(0,1800);
+}
+
+/* =========================
+   CLUSTER LINES
+========================= */
+function clusterLines(){
+  clusters = [];
+
+  edges.forEach(p=>{
+    let found=false;
+
+    for(let c of clusters){
+      const base = c.points[0];
+
+      if(
+        Math.abs(c.angle - p.angle) < 0.08 &&
+        Math.hypot(base.x-p.x, base.y-p.y) < 100
+      ){
+        c.points.push(p);
+        found=true;
+        break;
+      }
+    }
+
+    if(!found){
+      clusters.push({
+        angle:p.angle,
+        points:[p]
+      });
+    }
+  });
+
+  clusters = clusters.filter(c=>c.points.length > 18);
+}
+
+/* =========================
+   STABLE VANISHING POINT (FIXED DRIFT)
+========================= */
+function estimateVP(){
+  let sx=0, sy=0, count=0;
+
+  clusters.forEach(c=>{
+    const p = c.points[Math.floor(c.points.length/2)];
+
+    const dx = Math.cos(c.angle);
+    const dy = Math.sin(c.angle);
+
+    // 🔥 reduced projection distance = less drift
+    sx += p.x + dx*600;
+    sy += p.y + dy*600;
+
+    count++;
+  });
+
+  vanishingPoint = {
+    x:sx/count,
+    y:sy/count
+  };
+}
+
+/* =========================
+   DRAW CORRECTIONS ONLY
+========================= */
+function draw(){
+  ctx.putImageData(imageData,0,0);
+
+  clusters.forEach(c=>{
+    c.points.slice(0,6).forEach(p=>{
+
+      const dx = vanishingPoint.x - p.x;
+      const dy = vanishingPoint.y - p.y;
+
+      const target = Math.atan2(dy,dx);
+
+      let diff = Math.abs(target-c.angle);
+      diff = Math.min(diff, Math.PI-diff);
+
+      let color = "red";
+      if(diff < 0.12) color = "lime";
+      else if(diff < 0.25) color = "yellow";
+
+      ctx.strokeStyle=color;
+      ctx.globalAlpha=0.65;
+
+      ctx.beginPath();
+      ctx.moveTo(p.x - dx*6, p.y - dy*6);
+      ctx.lineTo(vanishingPoint.x, vanishingPoint.y);
+      ctx.stroke();
+    });
+  });
+
+  ctx.globalAlpha=1;
+
+  // smaller + cleaner VP
+  ctx.fillStyle="cyan";
+  ctx.beginPath();
+  ctx.arc(vanishingPoint.x, vanishingPoint.y, 4, 0, Math.PI*2);
+  ctx.fill();
+}
+
+/* =========================
+   DRAG VANISHING POINT
+========================= */
+function getPos(e){
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+
+  return {
+    x:(t.clientX-rect.left)*(canvas.width/rect.width),
+    y:(t.clientY-rect.top)*(canvas.height/rect.height)
+  };
+}
+
+function hitVP(p){
+  return Math.hypot(
+    p.x-vanishingPoint.x,
+    p.y-vanishingPoint.y
+  ) < 70;
+}
+
+function startDrag(e){
+  if(!frozen) return;
+
+  const p = getPos(e);
+  if(hitVP(p)){
+    dragging = true;
+    e.preventDefault();
+  }
+}
+
+function drag(e){
+  if(!dragging) return;
+
+  vanishingPoint = getPos(e);
+  draw();
+  e.preventDefault();
+}
+
+function stopDrag(){
+  dragging = false;
+}
+
+canvas.addEventListener("mousedown",startDrag);
+canvas.addEventListener("mousemove",drag);
+canvas.addEventListener("mouseup",stopDrag);
+
+canvas.addEventListener("touchstart",startDrag,{passive:false});
+canvas.addEventListener("touchmove",drag,{passive:false});
+canvas.addEventListener("touchend",stopDrag);
+
+/* =========================
+   RECENTER VP
+========================= */
+function recenterVP(){
+  vanishingPoint = {
+    x:canvas.width/2,
+    y:canvas.height/2
+  };
+
+  frozen = true;
+  draw();
+}
+</script>
+
+</body>
+</html>
