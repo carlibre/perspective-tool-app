@@ -3,56 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Perspective Tool v9 (Smart Page Detection)</title>
+<title>Perspective Tool v10</title>
 
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
 
 <style>
-body{
-  margin:0;
-  font-family:Inter;
-  background:#0b1020;
-  color:white;
-}
-.header{
-  height:60px;
-  display:flex;
-  align-items:center;
-  padding:0 20px;
-  background:#111827;
-}
-.workspace{
-  position:relative;
-  height:calc(100vh - 60px);
-}
-video, canvas{
-  position:absolute;
-  width:100%;
-  height:100%;
-  object-fit:cover;
-}
-.controls{
-  position:absolute;
-  bottom:20px;
-  left:20px;
-  z-index:10;
-}
-button{
-  padding:12px;
-  margin-right:10px;
-  border:none;
-  border-radius:8px;
-  background:#3b82f6;
-  color:white;
-  cursor:pointer;
-}
+body{margin:0;font-family:Inter;background:#0b1020;color:white;}
+.header{height:60px;display:flex;align-items:center;padding:0 20px;background:#111827;}
+.workspace{position:relative;height:calc(100vh - 60px);}
+video,canvas{position:absolute;width:100%;height:100%;object-fit:cover;}
+.controls{position:absolute;bottom:20px;left:20px;z-index:10;}
+button{padding:12px;margin-right:10px;border:none;border-radius:8px;background:#3b82f6;color:white;cursor:pointer;}
 </style>
 </head>
 
 <body>
 
 <div class="header">
-  <h3>Perspective Tool v9</h3>
+  <h3>Perspective Tool v10</h3>
 </div>
 
 <div class="workspace">
@@ -62,6 +30,7 @@ button{
   <div class="controls">
     <button onclick="startCamera()">Start Camera</button>
     <button onclick="capture()">Capture</button>
+    <button onclick="applyCrop()">Apply Crop</button>
     <button onclick="recenterVP()">Recenter VP</button>
   </div>
 </div>
@@ -74,9 +43,14 @@ const ctx = canvas.getContext("2d");
 let imageData;
 let edges = [];
 let vanishingPoint = {x:0,y:0};
-let pagePolygon = [];
-let frozen = false;
-let dragging = false;
+
+let frozen=false;
+let draggingVP=false;
+
+/* ===== CROP STATE ===== */
+let crop = {x:50,y:50,w:300,h:300};
+let cropping = false;
+let dragCorner = null;
 
 /* ================= CAMERA ================= */
 async function startCamera(){
@@ -92,87 +66,39 @@ async function startCamera(){
 
 /* ================= CAPTURE ================= */
 function capture(){
-  frozen = true;
+  frozen=true;
+  cropping=true;
 
   ctx.drawImage(video,0,0,canvas.width,canvas.height);
   imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
 
-  detectPage();   // 🔥 NEW
+  crop = {
+    x:canvas.width*0.1,
+    y:canvas.height*0.1,
+    w:canvas.width*0.8,
+    h:canvas.height*0.8
+  };
+
+  drawCrop();
+}
+
+/* ================= APPLY CROP ================= */
+function applyCrop(){
+  cropping=false;
   detectEdges();
   estimateVP();
   draw();
 }
 
-/* ================= PAGE DETECTION ================= */
-function detectPage(){
-  const d = imageData.data;
-  const w = canvas.width;
-  const h = canvas.height;
-
-  let points = [];
-
-  // find strong contrast edges (likely page border)
-  for(let y=2;y<h-2;y+=4){
-    for(let x=2;x<w-2;x+=4){
-      const i = (y*w+x)*4;
-
-      const gx = d[i+4] - d[i-4];
-      const gy = d[i+w*4] - d[i-w*4];
-
-      const mag = Math.sqrt(gx*gx+gy*gy);
-
-      if(mag > 200){
-        points.push({x,y});
-      }
-    }
-  }
-
-  // find extreme corners (simple but effective)
-  let tl = {x:99999,y:99999};
-  let tr = {x:0,y:99999};
-  let bl = {x:99999,y:0};
-  let br = {x:0,y:0};
-
-  points.forEach(p=>{
-    if(p.x+p.y < tl.x+tl.y) tl = p;
-    if((w-p.x)+p.y < (w-tr.x)+tr.y) tr = p;
-    if(p.x+(h-p.y) < bl.x+(h-bl.y)) bl = p;
-    if((w-p.x)+(h-p.y) < (w-br.x)+(h-br.y)) br = p;
-  });
-
-  pagePolygon = [tl,tr,br,bl];
-}
-
-/* ================= POINT IN POLYGON ================= */
-function insidePage(x,y){
-  let inside = false;
-
-  for(let i=0,j=pagePolygon.length-1;i<pagePolygon.length;j=i++){
-    const xi = pagePolygon[i].x, yi = pagePolygon[i].y;
-    const xj = pagePolygon[j].x, yj = pagePolygon[j].y;
-
-    const intersect =
-      ((yi>y)!=(yj>y)) &&
-      (x < (xj-xi)*(y-yi)/(yj-yi)+xi);
-
-    if(intersect) inside = !inside;
-  }
-
-  return inside;
-}
-
-/* ================= EDGE DETECTION ================= */
+/* ================= EDGE DETECTION (CROPPED) ================= */
 function detectEdges(){
-  edges = [];
+  edges=[];
 
   const d = imageData.data;
   const w = canvas.width;
-  const h = canvas.height;
 
-  for(let y=2;y<h-2;y+=2){
-    for(let x=2;x<w-2;x+=2){
-
-      if(!insidePage(x,y)) continue; // 🔥 key filter
+  for(let y=crop.y;y<crop.y+crop.h;y+=2){
+    for(let x=crop.x;x<crop.x+crop.w;x+=2){
 
       const i = (y*w+x)*4;
 
@@ -186,7 +112,7 @@ function detectEdges(){
 
       const mag = Math.sqrt(gx*gx+gy*gy);
 
-      if(mag > 120){
+      if(mag>120){
         edges.push({
           x,y,
           angle:Math.atan2(gy,gx),
@@ -197,7 +123,7 @@ function detectEdges(){
   }
 
   edges.sort((a,b)=>b.mag-a.mag);
-  edges = edges.slice(0,1500); // 🔥 fewer, cleaner
+  edges = edges.slice(0,2000);
 }
 
 /* ================= VANISHING POINT ================= */
@@ -219,16 +145,10 @@ function estimateVP(){
 function draw(){
   ctx.putImageData(imageData,0,0);
 
-  // draw page boundary
+  // crop border
   ctx.strokeStyle="cyan";
   ctx.lineWidth=2;
-  ctx.beginPath();
-  pagePolygon.forEach((p,i)=>{
-    if(i===0) ctx.moveTo(p.x,p.y);
-    else ctx.lineTo(p.x,p.y);
-  });
-  ctx.closePath();
-  ctx.stroke();
+  ctx.strokeRect(crop.x,crop.y,crop.w,crop.h);
 
   edges.forEach(p=>{
     const dx = vanishingPoint.x - p.x;
@@ -237,22 +157,22 @@ function draw(){
     const target = Math.atan2(dy,dx);
 
     let diff = Math.abs(target - p.angle);
-    diff = Math.min(diff, Math.PI-diff);
+    diff = Math.min(diff,Math.PI-diff);
 
     let color="red";
     if(diff<0.1) color="lime";
     else if(diff<0.2) color="yellow";
 
-    const len = 2000;
-    const dirX = Math.cos(target);
-    const dirY = Math.sin(target);
+    const len=2000;
+    const dirX=Math.cos(target);
+    const dirY=Math.sin(target);
 
     ctx.strokeStyle=color;
     ctx.globalAlpha=0.6;
 
     ctx.beginPath();
-    ctx.moveTo(p.x - dirX*len, p.y - dirY*len);
-    ctx.lineTo(p.x + dirX*len, p.y + dirY*len);
+    ctx.moveTo(p.x-dirX*len,p.y-dirY*len);
+    ctx.lineTo(p.x+dirX*len,p.y+dirY*len);
     ctx.stroke();
   });
 
@@ -262,6 +182,15 @@ function draw(){
   ctx.beginPath();
   ctx.arc(vanishingPoint.x,vanishingPoint.y,5,0,Math.PI*2);
   ctx.fill();
+}
+
+/* ================= CROP DRAW ================= */
+function drawCrop(){
+  ctx.putImageData(imageData,0,0);
+
+  ctx.strokeStyle="cyan";
+  ctx.lineWidth=3;
+  ctx.strokeRect(crop.x,crop.y,crop.w,crop.h);
 }
 
 /* ================= DRAG ================= */
@@ -275,30 +204,60 @@ function getPos(e){
   };
 }
 
-function startDrag(e){
-  if(!frozen) return;
+canvas.addEventListener("mousedown",e=>{
+  const p=getPos(e);
 
-  const p = getPos(e);
-
-  if(Math.hypot(p.x-vanishingPoint.x,p.y-vanishingPoint.y)<80){
-    dragging=true;
+  // crop mode
+  if(cropping){
+    if(Math.abs(p.x-crop.x)<20 && Math.abs(p.y-crop.y)<20) dragCorner="tl";
+    else if(Math.abs(p.x-(crop.x+crop.w))<20 && Math.abs(p.y-crop.y)<20) dragCorner="tr";
+    else if(Math.abs(p.x-crop.x)<20 && Math.abs(p.y-(crop.y+crop.h))<20) dragCorner="bl";
+    else if(Math.abs(p.x-(crop.x+crop.w))<20 && Math.abs(p.y-(crop.y+crop.h))<20) dragCorner="br";
   }
-}
+  else{
+    if(Math.hypot(p.x-vanishingPoint.x,p.y-vanishingPoint.y)<80){
+      draggingVP=true;
+    }
+  }
+});
 
-function drag(e){
-  if(!dragging) return;
+canvas.addEventListener("mousemove",e=>{
+  const p=getPos(e);
 
-  vanishingPoint = getPos(e);
-  draw();
-}
+  if(cropping && dragCorner){
+    if(dragCorner==="tl"){
+      crop.w += crop.x-p.x;
+      crop.h += crop.y-p.y;
+      crop.x=p.x; crop.y=p.y;
+    }
+    if(dragCorner==="tr"){
+      crop.w = p.x-crop.x;
+      crop.h += crop.y-p.y;
+      crop.y=p.y;
+    }
+    if(dragCorner==="bl"){
+      crop.w += crop.x-p.x;
+      crop.x=p.x;
+      crop.h = p.y-crop.y;
+    }
+    if(dragCorner==="br"){
+      crop.w = p.x-crop.x;
+      crop.h = p.y-crop.y;
+    }
 
-function stopDrag(){
-  dragging=false;
-}
+    drawCrop();
+  }
 
-canvas.addEventListener("mousedown",startDrag);
-canvas.addEventListener("mousemove",drag);
-canvas.addEventListener("mouseup",stopDrag);
+  if(draggingVP){
+    vanishingPoint=p;
+    draw(); // 🔥 live redraw
+  }
+});
+
+canvas.addEventListener("mouseup",()=>{
+  dragCorner=null;
+  draggingVP=false;
+});
 
 /* ================= RECENTER ================= */
 function recenterVP(){
