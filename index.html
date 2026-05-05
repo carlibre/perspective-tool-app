@@ -3,24 +3,57 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Perspective Tool v10</title>
+<title>Perspective Correction Tool v7 (Improved Mask)</title>
 
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
 
 <style>
-body{margin:0;font-family:Inter;background:#0b1020;color:white;}
-.header{height:60px;display:flex;align-items:center;padding:0 20px;background:#111827;}
-.workspace{position:relative;height:calc(100vh - 60px);}
-video,canvas{position:absolute;width:100%;height:100%;object-fit:cover;}
-.controls{position:absolute;bottom:20px;left:20px;z-index:10;}
-button{padding:12px;margin-right:10px;border:none;border-radius:8px;background:#3b82f6;color:white;cursor:pointer;}
+body {
+  margin:0;
+  font-family:Inter;
+  background:#0b1020;
+  color:white;
+}
+.header {
+  height:60px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:0 20px;
+  background:#111827;
+}
+.workspace {
+  position:relative;
+  height:calc(100vh - 60px);
+}
+video, canvas {
+  position:absolute;
+  width:100%;
+  height:100%;
+  object-fit:cover;
+}
+.controls {
+  position:absolute;
+  bottom:20px;
+  left:20px;
+  z-index:10;
+}
+button {
+  padding:12px;
+  margin-right:10px;
+  border:none;
+  border-radius:8px;
+  background:#3b82f6;
+  color:white;
+  cursor:pointer;
+}
 </style>
 </head>
 
 <body>
 
 <div class="header">
-  <h3>Perspective Tool v10</h3>
+  <h3>Perspective Correction Tool v7</h3>
 </div>
 
 <div class="workspace">
@@ -30,7 +63,6 @@ button{padding:12px;margin-right:10px;border:none;border-radius:8px;background:#
   <div class="controls">
     <button onclick="startCamera()">Start Camera</button>
     <button onclick="capture()">Capture</button>
-    <button onclick="applyCrop()">Apply Crop</button>
     <button onclick="recenterVP()">Recenter VP</button>
   </div>
 </div>
@@ -41,22 +73,18 @@ const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 
 let imageData;
-let edges = [];
 let vanishingPoint = {x:0,y:0};
+let edges = [];
+let clusters = [];
+let frozen = false;
+let dragging = false;
 
-let frozen=false;
-let draggingVP=false;
-
-/* ===== CROP STATE ===== */
-let crop = {x:50,y:50,w:300,h:300};
-let cropping = false;
-let dragCorner = null;
-
-/* ================= CAMERA ================= */
+/* ========================= CAMERA ========================= */
 async function startCamera(){
   const stream = await navigator.mediaDevices.getUserMedia({
     video:{facingMode:"environment"}
   });
+
   video.srcObject = stream;
   await new Promise(r=>video.onloadedmetadata=r);
 
@@ -64,41 +92,85 @@ async function startCamera(){
   canvas.height = video.videoHeight;
 }
 
-/* ================= CAPTURE ================= */
+/* ========================= CAPTURE ========================= */
 function capture(){
-  frozen=true;
-  cropping=true;
+  frozen = true;
 
   ctx.drawImage(video,0,0,canvas.width,canvas.height);
   imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
 
-  crop = {
-    x:canvas.width*0.1,
-    y:canvas.height*0.1,
-    w:canvas.width*0.8,
-    h:canvas.height*0.8
-  };
-
-  drawCrop();
-}
-
-/* ================= APPLY CROP ================= */
-function applyCrop(){
-  cropping=false;
   detectEdges();
+  clusterLines();
   estimateVP();
   draw();
 }
 
-/* ================= EDGE DETECTION (CROPPED) ================= */
+/* ========================= IMPROVED PAPER MASK ========================= */
+function getPaperMask(){
+  const d = imageData.data;
+  const w = canvas.width;
+  const h = canvas.height;
+
+  let mask = new Uint8Array(w*h);
+
+  // FIRST PASS (original brightness test)
+  for(let y=0;y<h;y+=2){
+    for(let x=0;x<w;x+=2){
+      const i = (y*w+x)*4;
+      const r = d[i];
+      const g = d[i+1];
+      const b = d[i+2];
+
+      const brightness = (r+g+b)/3;
+
+      if(
+        brightness > 175 &&
+        Math.abs(r-g) < 20 &&
+        Math.abs(g-b) < 20
+      ){
+        mask[y*w+x] = 1;
+      }
+    }
+  }
+
+  // SECOND PASS (remove isolated noise)
+  let clean = new Uint8Array(w*h);
+
+  for(let y=2;y<h-2;y+=2){
+    for(let x=2;x<w-2;x+=2){
+
+      let count = 0;
+
+      for(let yy=-2; yy<=2; yy+=2){
+        for(let xx=-2; xx<=2; xx+=2){
+          if(mask[(y+yy)*w + (x+xx)]) count++;
+        }
+      }
+
+      // keep only dense regions (paper)
+      if(count >= 6){
+        clean[y*w+x] = 1;
+      }
+    }
+  }
+
+  return clean;
+}
+
+/* ========================= EDGE DETECTION ========================= */
 function detectEdges(){
-  edges=[];
+  edges = [];
 
   const d = imageData.data;
   const w = canvas.width;
+  const h = canvas.height;
+  const mask = getPaperMask();
 
-  for(let y=crop.y;y<crop.y+crop.h;y+=2){
-    for(let x=crop.x;x<crop.x+crop.w;x+=2){
+  for(let y=2;y<h-2;y+=2){
+    for(let x=2;x<w-2;x+=2){
+
+      const idx = y*w+x;
+      if(!mask[idx]) continue;
 
       const i = (y*w+x)*4;
 
@@ -112,7 +184,7 @@ function detectEdges(){
 
       const mag = Math.sqrt(gx*gx+gy*gy);
 
-      if(mag>120){
+      if(mag > 150){ // 🔥 slightly stricter
         edges.push({
           x,y,
           angle:Math.atan2(gy,gx),
@@ -123,77 +195,99 @@ function detectEdges(){
   }
 
   edges.sort((a,b)=>b.mag-a.mag);
-  edges = edges.slice(0,2000);
+  edges = edges.slice(0,1800);
 }
 
-/* ================= VANISHING POINT ================= */
-function estimateVP(){
-  let sx=0, sy=0;
+/* ========================= CLUSTER LINES ========================= */
+function clusterLines(){
+  clusters = [];
 
   edges.forEach(p=>{
-    sx += p.x + Math.cos(p.angle)*400;
-    sy += p.y + Math.sin(p.angle)*400;
+    let found=false;
+
+    for(let c of clusters){
+      const base = c.points[0];
+
+      if(
+        Math.abs(c.angle - p.angle) < 0.08 &&
+        Math.hypot(base.x-p.x, base.y-p.y) < 100
+      ){
+        c.points.push(p);
+        found=true;
+        break;
+      }
+    }
+
+    if(!found){
+      clusters.push({
+        angle:p.angle,
+        points:[p]
+      });
+    }
+  });
+
+  clusters = clusters.filter(c=>c.points.length > 18);
+}
+
+/* ========================= VANISHING POINT ========================= */
+function estimateVP(){
+  let sx=0, sy=0, count=0;
+
+  clusters.forEach(c=>{
+    const p = c.points[Math.floor(c.points.length/2)];
+
+    const dx = Math.cos(c.angle);
+    const dy = Math.sin(c.angle);
+
+    sx += p.x + dx*600;
+    sy += p.y + dy*600;
+    count++;
   });
 
   vanishingPoint = {
-    x:sx/edges.length,
-    y:sy/edges.length
+    x:sx/count,
+    y:sy/count
   };
 }
 
-/* ================= DRAW ================= */
+/* ========================= DRAW ========================= */
 function draw(){
   ctx.putImageData(imageData,0,0);
 
-  // crop border
-  ctx.strokeStyle="cyan";
-  ctx.lineWidth=2;
-  ctx.strokeRect(crop.x,crop.y,crop.w,crop.h);
+  clusters.forEach(c=>{
+    c.points.slice(0,6).forEach(p=>{
 
-  edges.forEach(p=>{
-    const dx = vanishingPoint.x - p.x;
-    const dy = vanishingPoint.y - p.y;
+      const dx = vanishingPoint.x - p.x;
+      const dy = vanishingPoint.y - p.y;
 
-    const target = Math.atan2(dy,dx);
+      const target = Math.atan2(dy,dx);
 
-    let diff = Math.abs(target - p.angle);
-    diff = Math.min(diff,Math.PI-diff);
+      let diff = Math.abs(target-c.angle);
+      diff = Math.min(diff, Math.PI-diff);
 
-    let color="red";
-    if(diff<0.1) color="lime";
-    else if(diff<0.2) color="yellow";
+      let color = "red";
+      if(diff < 0.12) color = "lime";
+      else if(diff < 0.25) color = "yellow";
 
-    const len=2000;
-    const dirX=Math.cos(target);
-    const dirY=Math.sin(target);
+      ctx.strokeStyle=color;
+      ctx.globalAlpha=0.65;
 
-    ctx.strokeStyle=color;
-    ctx.globalAlpha=0.6;
-
-    ctx.beginPath();
-    ctx.moveTo(p.x-dirX*len,p.y-dirY*len);
-    ctx.lineTo(p.x+dirX*len,p.y+dirY*len);
-    ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(p.x - dx*6, p.y - dy*6);
+      ctx.lineTo(vanishingPoint.x, vanishingPoint.y);
+      ctx.stroke();
+    });
   });
 
   ctx.globalAlpha=1;
 
   ctx.fillStyle="cyan";
   ctx.beginPath();
-  ctx.arc(vanishingPoint.x,vanishingPoint.y,5,0,Math.PI*2);
+  ctx.arc(vanishingPoint.x, vanishingPoint.y, 4, 0, Math.PI*2);
   ctx.fill();
 }
 
-/* ================= CROP DRAW ================= */
-function drawCrop(){
-  ctx.putImageData(imageData,0,0);
-
-  ctx.strokeStyle="cyan";
-  ctx.lineWidth=3;
-  ctx.strokeRect(crop.x,crop.y,crop.w,crop.h);
-}
-
-/* ================= DRAG ================= */
+/* ========================= DRAG VP ========================= */
 function getPos(e){
   const rect = canvas.getBoundingClientRect();
   const t = e.touches ? e.touches[0] : e;
@@ -204,67 +298,52 @@ function getPos(e){
   };
 }
 
-canvas.addEventListener("mousedown",e=>{
-  const p=getPos(e);
+function hitVP(p){
+  return Math.hypot(
+    p.x-vanishingPoint.x,
+    p.y-vanishingPoint.y
+  ) < 70;
+}
 
-  // crop mode
-  if(cropping){
-    if(Math.abs(p.x-crop.x)<20 && Math.abs(p.y-crop.y)<20) dragCorner="tl";
-    else if(Math.abs(p.x-(crop.x+crop.w))<20 && Math.abs(p.y-crop.y)<20) dragCorner="tr";
-    else if(Math.abs(p.x-crop.x)<20 && Math.abs(p.y-(crop.y+crop.h))<20) dragCorner="bl";
-    else if(Math.abs(p.x-(crop.x+crop.w))<20 && Math.abs(p.y-(crop.y+crop.h))<20) dragCorner="br";
+function startDrag(e){
+  if(!frozen) return;
+
+  const p = getPos(e);
+
+  if(hitVP(p)){
+    dragging = true;
+    e.preventDefault();
   }
-  else{
-    if(Math.hypot(p.x-vanishingPoint.x,p.y-vanishingPoint.y)<80){
-      draggingVP=true;
-    }
-  }
-});
+}
 
-canvas.addEventListener("mousemove",e=>{
-  const p=getPos(e);
+function drag(e){
+  if(!dragging) return;
 
-  if(cropping && dragCorner){
-    if(dragCorner==="tl"){
-      crop.w += crop.x-p.x;
-      crop.h += crop.y-p.y;
-      crop.x=p.x; crop.y=p.y;
-    }
-    if(dragCorner==="tr"){
-      crop.w = p.x-crop.x;
-      crop.h += crop.y-p.y;
-      crop.y=p.y;
-    }
-    if(dragCorner==="bl"){
-      crop.w += crop.x-p.x;
-      crop.x=p.x;
-      crop.h = p.y-crop.y;
-    }
-    if(dragCorner==="br"){
-      crop.w = p.x-crop.x;
-      crop.h = p.y-crop.y;
-    }
+  vanishingPoint = getPos(e);
+  draw();
+  e.preventDefault();
+}
 
-    drawCrop();
-  }
+function stopDrag(){
+  dragging = false;
+}
 
-  if(draggingVP){
-    vanishingPoint=p;
-    draw(); // 🔥 live redraw
-  }
-});
+canvas.addEventListener("mousedown",startDrag);
+canvas.addEventListener("mousemove",drag);
+canvas.addEventListener("mouseup",stopDrag);
 
-canvas.addEventListener("mouseup",()=>{
-  dragCorner=null;
-  draggingVP=false;
-});
+canvas.addEventListener("touchstart",startDrag,{passive:false});
+canvas.addEventListener("touchmove",drag,{passive:false});
+canvas.addEventListener("touchend",stopDrag);
 
-/* ================= RECENTER ================= */
+/* ========================= RECENTER ========================= */
 function recenterVP(){
   vanishingPoint = {
     x:canvas.width/2,
     y:canvas.height/2
   };
+
+  frozen = true;
   draw();
 }
 </script>
